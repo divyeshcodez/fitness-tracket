@@ -1,16 +1,21 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
+  CameraPerspective,
   ExerciseId,
+  ExerciseSessionItem,
   ModelQuality,
   PoseLandmarks,
   SessionRecord,
+  SymmetryData,
 } from './types';
 import { EXERCISES } from './exercises/definitions';
 import { detectExercise } from './exercises/detector';
 import { ExerciseTracker } from './exercises/tracker';
+import { WorkoutSessionManager } from './exercises/sessionManager';
 import { PoseEngine } from './vision/poseLandmarker';
 import { generateSyntheticPose } from './vision/syntheticGenerator';
 import { calculateCaloriesBurned } from './utils/calories';
+import { calculateSymmetry, detectCameraPerspective } from './utils/biomechanics';
 import { audioCues } from './utils/audio';
 import {
   getUserWeightPref,
@@ -25,13 +30,11 @@ import { RepCalorieDisplay } from './components/RepCalorieDisplay';
 import { SessionSummary } from './components/SessionSummary';
 import { HistoryModal } from './components/HistoryModal';
 import {
-  Camera,
   RefreshCw,
   Play,
   Pause,
   Square,
   Sparkles,
-  Sliders,
   AlertCircle,
   Eye,
   EyeOff,
@@ -49,6 +52,9 @@ export default function App() {
   const [isDemoMode, setIsDemoMode] = useState<boolean>(false);
   const [uploadedVideoUrl, setUploadedVideoUrl] = useState<string | null>(null);
 
+  // Multi-exercise session aggregation
+  const [completedExercises, setCompletedExercises] = useState<ExerciseSessionItem[]>([]);
+
   // Camera & Tracking
   const [cameraActive, setCameraActive] = useState<boolean>(false);
   const [cameraDenied, setCameraDenied] = useState<boolean>(false);
@@ -64,8 +70,10 @@ export default function App() {
   const [fps, setFps] = useState<number>(30);
   const [modelQuality, setModelQuality] = useState<ModelQuality>('lite');
   const [showDebug, setShowDebug] = useState<boolean>(false);
+  const [perspective, setPerspective] = useState<CameraPerspective>('front');
+  const [symmetry, setSymmetry] = useState<SymmetryData | undefined>(undefined);
 
-  // Tracker state outputs
+  // Current Exercise Tracker outputs
   const [totalReps, setTotalReps] = useState<number>(0);
   const [goodReps, setGoodReps] = useState<number>(0);
   const [badReps, setBadReps] = useState<number>(0);
@@ -92,17 +100,18 @@ export default function App() {
   const [completedSession, setCompletedSession] = useState<SessionRecord | null>(null);
   const [isHistoryOpen, setIsHistoryOpen] = useState<boolean>(false);
 
-  // DOM Refs
+  // DOM Refs & Logic Engines
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const uploadedVideoRef = useRef<HTMLVideoElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const poseEngineRef = useRef<PoseEngine | null>(null);
   const trackerRef = useRef<ExerciseTracker>(new ExerciseTracker(EXERCISES.squat));
+  const sessionManagerRef = useRef<WorkoutSessionManager>(new WorkoutSessionManager('squat'));
   const animFrameIdRef = useRef<number | null>(null);
   const sessionStartTimeRef = useRef<number>(0);
   const activeExerciseSecondsRef = useRef<number>(0);
 
-  // Handle URL query parameters for Ultra Mode automation testing (?autostart=1 or ?demo=1)
+  // Handle URL query parameters for automation testing (?autostart=1 or ?demo=1)
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
@@ -110,6 +119,7 @@ export default function App() {
         const testEx = (params.get('exercise') as ExerciseId) || 'squat';
         setExerciseId(testEx);
         trackerRef.current.setExercise(EXERCISES[testEx]);
+        sessionManagerRef.current.setCurrentExercise(testEx);
         setIsDemoMode(true);
         setScreen('live');
         sessionStartTimeRef.current = Date.now();
@@ -218,6 +228,59 @@ export default function App() {
     }
   };
 
+  // Switch Exercise (preserves previous exercise counts & starts fresh for new exercise)
+  const switchExercise = useCallback(
+    (newExerciseId: ExerciseId, manual = false) => {
+      if (newExerciseId === exerciseId) return;
+
+      // 1. Commit current exercise data to session manager
+      sessionManagerRef.current.recordExerciseProgress(exerciseId, {
+        reps: totalReps,
+        goodReps,
+        badReps,
+        caloriesBurned,
+        activeSeconds: activeExerciseSecondsRef.current,
+        avgFormScore: formScore,
+        symmetryScore: symmetry?.isImbalanced ? 82 : 98,
+        muscleEngagement: cumulativeMuscles,
+      });
+
+      setCompletedExercises(sessionManagerRef.current.getAllExerciseItems());
+
+      // 2. Switch to new exercise
+      setExerciseId(newExerciseId);
+      if (manual) setIsAutoDetected(false);
+
+      sessionManagerRef.current.setCurrentExercise(newExerciseId);
+      trackerRef.current.setExercise(EXERCISES[newExerciseId]);
+      trackerRef.current.reset();
+
+      // Reset live counter for this new exercise
+      setTotalReps(0);
+      setGoodReps(0);
+      setBadReps(0);
+      setCaloriesBurned(0);
+      setFormScore(95);
+      activeExerciseSecondsRef.current = 0;
+
+      // Audio cue
+      if (voiceEnabled) {
+        audioCues.speak(`Switched to ${EXERCISES[newExerciseId].name}`, true);
+      }
+    },
+    [
+      exerciseId,
+      totalReps,
+      goodReps,
+      badReps,
+      caloriesBurned,
+      formScore,
+      symmetry,
+      cumulativeMuscles,
+      voiceEnabled,
+    ]
+  );
+
   // Main real-time computer vision render loop
   useEffect(() => {
     if (screen !== 'live') {
@@ -237,14 +300,12 @@ export default function App() {
         let currentFps = 30;
 
         if (isDemoMode) {
-          // Synthetic demo pose generator
           const synth = generateSyntheticPose(exerciseId, timestamp);
           currentLms = synth.landmarks;
           outOfFrameStatus = synth.isOutOfFrame;
           currentFps = 30;
           conf = 0.98;
         } else if (uploadedVideoRef.current && uploadedVideoUrl) {
-          // Process uploaded video
           const vid = uploadedVideoRef.current;
           if (vid.readyState >= 2 && poseEngineRef.current?.isReady()) {
             const res = poseEngineRef.current.processVideoFrame(vid, timestamp);
@@ -254,7 +315,6 @@ export default function App() {
             currentFps = res.fps;
           }
         } else if (videoRef.current && cameraActive) {
-          // Process live camera stream
           const vid = videoRef.current;
           if (vid.readyState >= 2 && poseEngineRef.current?.isReady()) {
             const res = poseEngineRef.current.processVideoFrame(vid, timestamp);
@@ -272,12 +332,19 @@ export default function App() {
 
         // Update Tracker if landmarks detected and user is in frame
         if (currentLms && !outOfFrameStatus && conf >= 0.45) {
-          // Auto-detect exercise if enabled
+          // Detect perspective & symmetry
+          const pers = detectCameraPerspective(currentLms);
+          setPerspective(pers);
+
+          const sym = calculateSymmetry(exerciseId, currentLms);
+          setSymmetry(sym);
+
+          // Auto-detect exercise change if user switches movements in real time
           if (isAutoDetected && !isDemoMode) {
             const detected = detectExercise(currentLms);
-            if (detected.confidence > 0.8 && detected.detectedExercise !== exerciseId) {
-              setExerciseId(detected.detectedExercise);
-              trackerRef.current.setExercise(EXERCISES[detected.detectedExercise]);
+            if (detected.confidence > 0.85 && detected.detectedExercise !== exerciseId) {
+              switchExercise(detected.detectedExercise, false);
+              return;
             }
           }
 
@@ -317,6 +384,8 @@ export default function App() {
             }
           } else if (trackerUpdate.formFeedback.severity !== 'good' && voiceEnabled) {
             audioCues.speak(trackerUpdate.formFeedback.message);
+          } else if (sym.isImbalanced && sym.message && voiceEnabled) {
+            audioCues.speak(sym.message);
           }
         }
       }
@@ -340,6 +409,7 @@ export default function App() {
     isAutoDetected,
     userWeightKg,
     voiceEnabled,
+    switchExercise,
   ]);
 
   // Handle Start Tracking
@@ -349,7 +419,11 @@ export default function App() {
     saveUserWeightPref(weightKg, unit);
     setIsDemoMode(demo);
 
-    // Reset tracker
+    // Reset managers
+    sessionManagerRef.current.reset();
+    sessionManagerRef.current.setCurrentExercise(exerciseId);
+    setCompletedExercises([]);
+
     trackerRef.current.reset();
     setTotalReps(0);
     setGoodReps(0);
@@ -372,11 +446,9 @@ export default function App() {
     sessionStartTimeRef.current = Date.now();
   };
 
-  // Handle Exercise Selection Override
+  // Handle Exercise Selection Override via dropdown
   const handleSelectExercise = (id: ExerciseId) => {
-    setExerciseId(id);
-    setIsAutoDetected(false); // Manual override locks user preference
-    trackerRef.current.setExercise(EXERCISES[id]);
+    switchExercise(id, true);
   };
 
   // Handle End Workout Session
@@ -386,19 +458,56 @@ export default function App() {
       Math.round((Date.now() - sessionStartTimeRef.current) / 1000)
     );
 
+    // 1. Commit last active exercise progress
+    sessionManagerRef.current.recordExerciseProgress(exerciseId, {
+      reps: totalReps,
+      goodReps,
+      badReps,
+      caloriesBurned,
+      activeSeconds: activeExerciseSecondsRef.current,
+      avgFormScore: formScore,
+      symmetryScore: symmetry?.isImbalanced ? 82 : 98,
+      muscleEngagement: cumulativeMuscles,
+    });
+
+    const allItems = sessionManagerRef.current.getAllExerciseItems();
+    const grandTotalReps = sessionManagerRef.current.getTotalReps();
+    const grandTotalCalories = sessionManagerRef.current.getTotalCalories();
+    const combinedMuscles = sessionManagerRef.current.getCombinedMuscleEngagement();
+    const avgScore = sessionManagerRef.current.getOverallFormScore();
+    const symmetryScore = sessionManagerRef.current.getOverallSymmetryScore();
+
     const record: SessionRecord = {
       id: `session_${Date.now()}`,
       timestamp: Date.now(),
-      exerciseId,
-      exerciseName: EXERCISES[exerciseId].name,
       userWeightKg,
-      totalReps,
-      goodReps,
-      badReps,
-      avgFormScore: formScore,
+      totalReps: grandTotalReps > 0 ? grandTotalReps : totalReps,
+      goodReps: allItems.reduce((acc, i) => acc + i.goodReps, 0) || goodReps,
+      badReps: allItems.reduce((acc, i) => acc + i.badReps, 0) || badReps,
+      caloriesBurned: grandTotalCalories > 0 ? grandTotalCalories : caloriesBurned,
       durationSeconds: sessionDuration,
-      caloriesBurned,
-      muscleEngagement: cumulativeMuscles,
+      avgFormScore: avgScore,
+      overallSymmetryScore: symmetryScore,
+      muscleEngagement: combinedMuscles,
+      exercises: allItems.length > 0 ? allItems : [
+        {
+          exerciseId,
+          exerciseName: EXERCISES[exerciseId].name,
+          reps: totalReps,
+          goodReps,
+          badReps,
+          caloriesBurned,
+          activeSeconds: activeExerciseSecondsRef.current,
+          avgFormScore: formScore,
+          symmetryScore: 95,
+          muscleEngagement: cumulativeMuscles,
+        },
+      ],
+      exerciseId,
+      exerciseName:
+        allItems.length > 1
+          ? `${allItems.length} Exercises`
+          : EXERCISES[exerciseId].name,
     };
 
     setCompletedSession(record);
@@ -424,10 +533,21 @@ export default function App() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `motionlens-workout-${completedSession.exerciseId}.json`;
+    a.download = `motionlens-workout-${completedSession.id}.json`;
     a.click();
     URL.revokeObjectURL(url);
   };
+
+  // Compute aggregated totals for live HUD
+  const totalSessionPriorReps = sessionManagerRef.current
+    .getAllExerciseItems()
+    .filter((i) => i.exerciseId !== exerciseId)
+    .reduce((sum, i) => sum + i.reps, 0);
+
+  const totalSessionPriorCalories = sessionManagerRef.current
+    .getAllExerciseItems()
+    .filter((i) => i.exerciseId !== exerciseId)
+    .reduce((sum, i) => sum + i.caloriesBurned, 0);
 
   return (
     <div className="min-h-screen bg-[#0B0F14] text-slate-100 flex flex-col font-sans select-none">
@@ -445,7 +565,6 @@ export default function App() {
       {/* 2. COUNTDOWN SCREEN */}
       {screen === 'countdown' && (
         <div className="relative min-h-screen flex flex-col items-center justify-center bg-[#0B0F14] overflow-hidden">
-          {/* Background Video Preview */}
           <video
             ref={videoRef}
             playsInline
@@ -543,14 +662,13 @@ export default function App() {
               <span>Confidence: <strong className="text-white">{Math.round(trackingConfidence * 100)}%</strong></span>
               <span>Angle: <strong className="text-white">{currentAngle}°</strong></span>
               <span>Phase: <strong className="text-cyan-300 uppercase">{repPhase}</strong></span>
+              <span>Perspective: <strong className="text-white uppercase">{perspective}</strong></span>
               <span>Active Time: <strong className="text-white">{activeExerciseSecondsRef.current.toFixed(1)}s</strong></span>
-              <span>Model: <strong className="text-white uppercase">{modelQuality}</strong></span>
+              <span>Total Session Exercises: <strong className="text-white">{completedExercises.length + 1}</strong></span>
             </div>
           )}
 
-          {/* Main 2-Column Responsive Layout:
-              Desktop: Camera Left ~60%, Muscle Map + Stats Right ~40%
-              Mobile: Camera Top, Muscle Map + Stats Below */}
+          {/* Main 2-Column Responsive Layout */}
           <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 items-stretch min-h-0">
             {/* LEFT / TOP: Camera Stream & Skeleton Overlay (7 cols on lg) */}
             <div className="lg:col-span-7 flex flex-col gap-3 min-h-[380px] lg:min-h-0">
@@ -566,7 +684,7 @@ export default function App() {
                   style={{ display: !isDemoMode && !uploadedVideoUrl ? 'block' : 'none' }}
                 />
 
-                {/* 2. Uploaded Video Element (if testing with local file) */}
+                {/* 2. Uploaded Video Element */}
                 {uploadedVideoUrl && (
                   <video
                     ref={uploadedVideoRef}
@@ -579,17 +697,16 @@ export default function App() {
                   />
                 )}
 
-                {/* 3. Demo Mode Animated Canvas Canvas / Placeholder */}
+                {/* 3. Demo Mode Animated Canvas Placeholder */}
                 {isDemoMode && (
                   <div className="absolute inset-0 bg-gradient-to-b from-slate-950 via-[#0E1520] to-[#0B0F14] flex flex-col items-center justify-center">
-                    {/* Stylized background grid */}
                     <div className="absolute inset-0 bg-[radial-gradient(#1E293B_1px,transparent_1px)] [background-size:24px_24px] opacity-40 pointer-events-none" />
                     <div className="text-center z-10 p-4">
                       <span className="font-mono text-xs uppercase tracking-widest text-cyan-400 font-semibold block mb-1">
                         Biomechanical Demo Simulation
                       </span>
                       <p className="text-xs text-slate-400 max-w-xs mx-auto">
-                        Generating real-time oscillating kinematics for {EXERCISES[exerciseId].name}
+                        Real-time kinematic tracking for {EXERCISES[exerciseId].name}
                       </p>
                     </div>
                   </div>
@@ -622,7 +739,7 @@ export default function App() {
                   </div>
                 )}
 
-                {/* 4. Real-time Skeleton Overlay */}
+                {/* 4. Real-time Skeleton Overlay with On-Body Angle Arcs & Symmetry */}
                 <SkeletonCanvas
                   landmarks={landmarks}
                   problemJoints={formFeedback.problemJoints}
@@ -631,15 +748,20 @@ export default function App() {
                   mirrored={mirrored && !isDemoMode && !uploadedVideoUrl}
                   videoWidth={640}
                   videoHeight={480}
+                  currentAngle={currentAngle}
+                  targetAngleThreshold={EXERCISES[exerciseId].repConfig.inflectionAngle}
+                  perspective={perspective}
+                  symmetry={symmetry}
+                  exerciseId={exerciseId}
                 />
 
-                {/* Floating Bottom Camera Controls (Pause, Switch Camera, Mirror) */}
+                {/* Floating Bottom Camera Controls */}
                 <div className="absolute bottom-4 left-4 right-4 z-20 flex items-center justify-between pointer-events-auto">
                   {/* Pause / Resume Button */}
                   <button
                     type="button"
                     onClick={() => setIsPaused(!isPaused)}
-                    className="min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-900/80 hover:bg-slate-900 text-white backdrop-blur-md border border-slate-700/80 text-xs font-semibold flex items-center gap-2 shadow-lg transition-transform active:scale-95"
+                    className="min-h-[44px] px-3.5 py-2 rounded-xl bg-slate-900/80 hover:bg-slate-900 text-white backdrop-blur-md border border-slate-700/80 text-xs font-semibold flex items-center gap-2 shadow-lg transition-transform active:scale-95 cursor-pointer"
                     aria-label={isPaused ? 'Resume tracking' : 'Pause tracking'}
                   >
                     {isPaused ? (
@@ -655,13 +777,13 @@ export default function App() {
                     )}
                   </button>
 
-                  {/* Switch Camera & Mirror Buttons (Only visible with live camera) */}
+                  {/* Switch Camera & Mirror Buttons */}
                   {!isDemoMode && !uploadedVideoUrl && (
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
                         onClick={() => setMirrored(!mirrored)}
-                        className={`min-h-[44px] px-3 py-2 rounded-xl border backdrop-blur-md text-xs font-medium transition-colors ${
+                        className={`min-h-[44px] px-3 py-2 rounded-xl border backdrop-blur-md text-xs font-medium transition-colors cursor-pointer ${
                           mirrored
                             ? 'bg-cyan-500/20 border-cyan-500/40 text-cyan-300'
                             : 'bg-slate-900/80 border-slate-700/80 text-slate-300 hover:text-white'
@@ -674,7 +796,7 @@ export default function App() {
                       <button
                         type="button"
                         onClick={handleSwitchCamera}
-                        className="min-h-[44px] p-2.5 rounded-xl bg-slate-900/80 hover:bg-slate-900 text-slate-300 hover:text-white border border-slate-700/80 transition-transform active:scale-95"
+                        className="min-h-[44px] p-2.5 rounded-xl bg-slate-900/80 hover:bg-slate-900 text-slate-300 hover:text-white border border-slate-700/80 transition-transform active:scale-95 cursor-pointer"
                         title="Switch front/back camera"
                         aria-label="Switch camera"
                       >
@@ -686,9 +808,9 @@ export default function App() {
               </div>
             </div>
 
-            {/* RIGHT / BOTTOM: Muscle Heatmap & Live Telemetry (5 cols on lg) */}
+            {/* RIGHT / BOTTOM: Muscle Heatmap & Live Multi-Exercise Telemetry (5 cols on lg) */}
             <div className="lg:col-span-5 flex flex-col gap-4">
-              {/* Reps, Calories & Form Panel */}
+              {/* Reps, Calories, Multi-Exercise Chips & Form Panel */}
               <div className="shrink-0">
                 <RepCalorieDisplay
                   totalReps={totalReps}
@@ -707,6 +829,10 @@ export default function App() {
                   onSelectExercise={handleSelectExercise}
                   voiceEnabled={voiceEnabled}
                   onToggleVoice={() => setVoiceEnabled(!voiceEnabled)}
+                  completedExercises={completedExercises}
+                  totalSessionReps={totalSessionPriorReps}
+                  totalSessionCalories={totalSessionPriorCalories}
+                  symmetry={symmetry}
                 />
               </div>
 

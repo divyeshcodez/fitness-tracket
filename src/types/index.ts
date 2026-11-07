@@ -81,19 +81,46 @@ export interface RepEvent {
   timestamp: number;
 }
 
+export type CameraPerspective = 'front' | 'side_left' | 'side_right' | 'diagonal';
+
+export interface SymmetryData {
+  leftAngle: number;
+  rightAngle: number;
+  leftPercent: number; // e.g. 50
+  rightPercent: number; // e.g. 50
+  isImbalanced: boolean;
+  message?: string;
+}
+
+export interface ExerciseSessionItem {
+  exerciseId: ExerciseId;
+  exerciseName: string;
+  reps: number;
+  goodReps: number;
+  badReps: number;
+  caloriesBurned: number;
+  activeSeconds: number;
+  avgFormScore: number;
+  symmetryScore: number; // 0 - 100
+  muscleEngagement: MuscleIntensityMap;
+}
+
 export interface SessionRecord {
   id: string;
   timestamp: number;
-  exerciseId: ExerciseId;
-  exerciseName: string;
   userWeightKg: number;
   totalReps: number;
   goodReps: number;
   badReps: number;
-  avgFormScore: number;
-  durationSeconds: number;
   caloriesBurned: number;
+  durationSeconds: number;
+  avgFormScore: number;
+  overallSymmetryScore: number;
   muscleEngagement: MuscleIntensityMap;
+  exercises: ExerciseSessionItem[];
+  exerciseId?: ExerciseId; // primary/last exercise
+  exerciseName?: string;
 }
 
 export type ModelQuality = 'lite' | 'balanced' | 'accurate';
+

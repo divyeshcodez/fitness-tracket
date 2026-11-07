@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
-import { ExerciseId, FormFeedback, RepPhase } from '../types';
+import { ExerciseId, ExerciseSessionItem, FormFeedback, RepPhase, SymmetryData } from '../types';
 import { EXERCISES } from '../exercises/definitions';
-import { Info, Volume2, VolumeX, AlertTriangle, CheckCircle, Flame } from 'lucide-react';
+import { Info, Volume2, VolumeX, AlertTriangle, CheckCircle, Flame, Layers } from 'lucide-react';
 
 interface RepCalorieDisplayProps {
   totalReps: number;
@@ -20,6 +20,10 @@ interface RepCalorieDisplayProps {
   onSelectExercise: (id: ExerciseId) => void;
   voiceEnabled: boolean;
   onToggleVoice: () => void;
+  completedExercises?: ExerciseSessionItem[];
+  totalSessionReps?: number;
+  totalSessionCalories?: number;
+  symmetry?: SymmetryData;
 }
 
 export const RepCalorieDisplay: React.FC<RepCalorieDisplayProps> = ({
@@ -39,6 +43,10 @@ export const RepCalorieDisplay: React.FC<RepCalorieDisplayProps> = ({
   onSelectExercise,
   voiceEnabled,
   onToggleVoice,
+  completedExercises = [],
+  totalSessionReps = 0,
+  totalSessionCalories = 0,
+  symmetry,
 }) => {
   const [showCalorieInfo, setShowCalorieInfo] = useState(false);
 
@@ -51,8 +59,56 @@ export const RepCalorieDisplay: React.FC<RepCalorieDisplayProps> = ({
 
   const currentExercise = EXERCISES[currentExerciseId];
 
+  // Combined reps & calories across all exercises in this workout session
+  const combinedReps = totalSessionReps + totalReps;
+  const combinedKcal = Math.round((totalSessionCalories + caloriesBurned) * 10) / 10;
+
   return (
-    <div className="flex flex-col gap-3 h-full">
+    <div className="flex flex-col gap-2.5 h-full">
+      {/* Multi-Exercise History Carousel / Chip Bar */}
+      {completedExercises.length > 0 && (
+        <div className="bg-[#131A22] border border-slate-800 rounded-xl p-2.5 shadow-sm">
+          <div className="flex items-center justify-between mb-1.5 text-[10px] text-slate-400 font-semibold uppercase tracking-wider">
+            <span className="flex items-center gap-1.5">
+              <Layers className="w-3 h-3 text-cyan-400" />
+              <span>Multi-Exercise Session Progress ({completedExercises.length + 1} exercises)</span>
+            </span>
+            <span className="font-mono text-cyan-300">
+              Total: {combinedReps} reps · {combinedKcal.toFixed(1)} kcal
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 scrollbar-thin">
+            {completedExercises.map((item) => (
+              <button
+                key={item.exerciseId}
+                type="button"
+                onClick={() => onSelectExercise(item.exerciseId)}
+                className="shrink-0 px-2.5 py-1 rounded-lg bg-slate-900 border border-slate-800 hover:border-cyan-500/40 text-left transition-colors cursor-pointer"
+                title={`Switch back to ${item.exerciseName}`}
+              >
+                <span className="text-[11px] font-semibold text-slate-200 block truncate max-w-[130px]">
+                  {item.exerciseName}
+                </span>
+                <span className="text-[10px] font-mono text-cyan-400 tabular-nums">
+                  {item.reps} reps · {item.caloriesBurned.toFixed(1)} kcal
+                </span>
+              </button>
+            ))}
+
+            {/* Current Active Indicator */}
+            <div className="shrink-0 px-2.5 py-1 rounded-lg bg-cyan-950/70 border border-cyan-500/50 text-left">
+              <span className="text-[10px] font-mono uppercase text-cyan-400 block font-bold">
+                Active: {currentExercise.name}
+              </span>
+              <span className="text-[11px] font-mono text-white font-bold tabular-nums">
+                {totalReps} reps now
+              </span>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Exercise Selector Bar */}
       <div className="bg-[#131A22] border border-slate-800 rounded-xl p-3 flex items-center justify-between gap-3 shadow-md">
         <div className="flex items-center gap-2 min-w-0">
@@ -60,7 +116,7 @@ export const RepCalorieDisplay: React.FC<RepCalorieDisplayProps> = ({
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-[10px] uppercase font-semibold text-slate-400 tracking-wider">
-                Active Movement
+                Current Exercise
               </span>
               {isAutoDetected && (
                 <span className="text-[10px] text-cyan-400 font-mono tracking-tight bg-cyan-950/60 px-1.5 py-0.5 rounded border border-cyan-800/60">
@@ -105,20 +161,19 @@ export const RepCalorieDisplay: React.FC<RepCalorieDisplayProps> = ({
       <div className="grid grid-cols-2 gap-3">
         {/* Rep Counter Card */}
         <div className="bg-[#131A22] border border-slate-800 rounded-2xl p-4 flex flex-col justify-between shadow-lg relative overflow-hidden group">
-          {/* Subtle background glow on rep movement */}
           <div
             className="absolute -right-10 -bottom-10 w-32 h-32 rounded-full bg-cyan-500/10 blur-2xl pointer-events-none transition-opacity duration-300"
             style={{ opacity: repPhase !== 'idle' ? 0.8 : 0.2 }}
           />
 
           <div className="flex items-center justify-between text-xs text-slate-400 uppercase tracking-wider font-semibold">
-            <span>Reps</span>
+            <span>{currentExercise.name} Reps</span>
             <span className="font-mono text-[11px] text-cyan-400 capitalize">
               {repPhase !== 'idle' ? repPhase : 'Ready'}
             </span>
           </div>
 
-          {/* Giant Number */}
+          {/* Giant Number in JetBrains Mono */}
           <div className="my-1">
             <span className="font-mono font-extrabold text-5xl sm:text-6xl lg:text-7xl text-white tracking-tighter tabular-nums drop-shadow-md">
               {totalReps}
@@ -126,7 +181,7 @@ export const RepCalorieDisplay: React.FC<RepCalorieDisplayProps> = ({
           </div>
 
           {/* Sub stats: Good vs Bad */}
-          <div className="flex items-center gap-3 pt-2 border-t border-slate-800 text-xs font-mono tabular-nums text-slate-400">
+          <div className="flex items-center justify-between pt-2 border-t border-slate-800 text-xs font-mono tabular-nums text-slate-400">
             <span className="flex items-center gap-1 text-emerald-400">
               <CheckCircle className="w-3.5 h-3.5" />
               <span>{goodReps} good</span>
@@ -135,6 +190,11 @@ export const RepCalorieDisplay: React.FC<RepCalorieDisplayProps> = ({
               <span className="flex items-center gap-1 text-amber-400">
                 <AlertTriangle className="w-3.5 h-3.5" />
                 <span>{badReps} fix</span>
+              </span>
+            )}
+            {completedExercises.length > 0 && (
+              <span className="text-slate-500 text-[11px]">
+                ({combinedReps} total)
               </span>
             )}
           </div>
@@ -157,11 +217,11 @@ export const RepCalorieDisplay: React.FC<RepCalorieDisplayProps> = ({
             </button>
           </div>
 
-          {/* Giant Calorie Number */}
+          {/* Giant Calorie Number in JetBrains Mono */}
           <div className="my-1">
             <div className="flex items-baseline gap-1.5">
               <span className="font-mono font-extrabold text-5xl sm:text-6xl lg:text-7xl text-orange-400 tracking-tighter tabular-nums drop-shadow-md">
-                {caloriesBurned.toFixed(1)}
+                {combinedKcal.toFixed(1)}
               </span>
               <span className="text-xs sm:text-sm font-mono text-slate-400 uppercase">kcal</span>
             </div>
@@ -188,12 +248,12 @@ export const RepCalorieDisplay: React.FC<RepCalorieDisplayProps> = ({
             dynamically modulated by rep tempo and joint range-of-motion completion.
           </p>
           <p className="mt-1 text-[11px] text-slate-400">
-            Calories pause when resting. Estimates only; not clinical indirect calorimetry.
+            Automatically accumulates across multiple exercises performed in this session.
           </p>
         </div>
       )}
 
-      {/* Live Form Feedback Card */}
+      {/* Live Form Feedback & Symmetry Cue Card */}
       <div className={`border rounded-xl p-3 shadow-md flex items-center justify-between gap-3 ${feedbackStyles}`}>
         <div className="flex items-center gap-2.5 min-w-0">
           {formFeedback.severity === 'good' ? (
@@ -201,7 +261,14 @@ export const RepCalorieDisplay: React.FC<RepCalorieDisplayProps> = ({
           ) : (
             <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 animate-pulse" />
           )}
-          <span className="text-sm font-semibold truncate">{formFeedback.message}</span>
+          <div className="min-w-0">
+            <span className="text-sm font-semibold block truncate">{formFeedback.message}</span>
+            {symmetry?.isImbalanced && (
+              <span className="text-xs text-amber-400 font-mono block">
+                {symmetry.message}
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Rep Depth / Inflection Progress Bar */}
